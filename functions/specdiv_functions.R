@@ -1,5 +1,6 @@
 #### Spectral diversity functions
 # Etienne Laliberté, February 2019
+# Updated using the terra package by Bryce Currey, 2023
 
 
 ### Brightness normalization -----
@@ -51,16 +52,17 @@ pca_mat <- function(x, scaling = c(1, 2), p = 0.99) {
 
 
 ### PCA for image cube -----
+# updated for terra
 pca <- function(cube, scaling = c(1, 2), p = 0.99) {
   require(tidyverse)
-  require(raster)
-  require(sp)
-  points <- rasterToPoints(cube, spatial = F)
-  xy <- points[, 1:2]
-  pixels <- points[, 3:ncol(points)]
+  require(terra)
+  cube.df <- as.data.frame(cube, xy = T)
+  xy <- cube.df[, 1:2]
+  pixels <- cube.df[, 3:ncol(cube.df)]
   Y <- scale(pixels, center = TRUE, scale = FALSE)
   n <- nrow(Y)
-  Y.svd = svd(Y)
+  Y[is.na(Y)] <- 0 # shouldn't be any but could be a few.
+  Y.svd = svd(Y) #singular value decomposition
   values = (1/(n - 1)) * Y.svd$d^2
   epsilon = sqrt(.Machine$double.eps)
   k <- sum(values > epsilon)
@@ -74,18 +76,17 @@ pca <- function(cube, scaling = c(1, 2), p = 0.99) {
   if (scaling == 1) {
     obj <- Y %*% U
     descript <- U
-  }
-  else {
+  } else {
     obj <- sqrt(n - 1) * as.matrix(Y.svd$u[, 1:n.pcs])
     descript <- U %*% diag(values.sel^(0.5))
   }
   colnames(obj) <- paste0('PC', 1:n.pcs)
   colnames(descript) <- paste0('PC', 1:n.pcs)
   rownames(descript) <- colnames(pixels)
-  points_df <- SpatialPixelsDataFrame(xy, as.data.frame(obj), proj4string = CRS(proj4string(cube) ))
-  prop.sel <- prop[1:n.pcs]; names(prop.sel) <- colnames(descript)
+  points_df <- cbind.data.frame(xy, obj)
+  prop.sel <- prop[1:n.pcs];names(prop.sel) <- colnames(descript) #, proj4string = crs(cube)
   cumprop.sel <- cumprop[1:n.pcs]; names(cumprop.sel) <- colnames(descript)
-  cube_pc <- brick(points_df)
+  cube_pc <- rast(points_df, type = 'xyz', crs = crs(cube))
   out <- list(cube_pc = cube_pc, band_contrib = descript, prop = prop.sel, cumprop = cumprop.sel)
   return(out)
 }
@@ -110,11 +111,11 @@ build_pc_plot <- function(cube) {
   require(tidyverse)
   points <- rasterToPoints(cube, spatial = F) %>% 
     as_tibble() %>% 
-    gather(key = PC, value = value, -x, -y) %>% 
-    mutate(PC = factor(PC, levels = paste0('PC', 1:n_distinct(PC)) ) ) 
+    tidyr::gather(key = PC, value = value, -x, -y) %>% 
+    dplyr::mutate(PC = factor(PC, levels = paste0('PC', 1:n_distinct(PC)) ) ) 
   cube_plots <- points %>%
     group_by(PC) %>% 
-    do(plots = make_plot(df = .))
+    dplyr::do(plots = make_plot(df = .))
 return(cube_plots)
 }
 
@@ -134,44 +135,44 @@ count_noNA <- function(x) {
 }
 
 ### Count masked/missing pixels -----
+# updated
 count_pixels <- function(cube, fact = 40) {
-  require(raster)
+  require(terra)
   require(tidyverse)
   # Get plots (or communities)
   new_res <- res(cube) * fact
-  cube_plots <- raster(crs = proj4string(cube))
-  extent(cube_plots) <- extent(cube)
+  cube_plots <- rast(crs = crs(cube))
+  ext(cube_plots) <- ext(cube)
   res(cube_plots) <- new_res
   cube_plots <- setValues(cube_plots, values = 1:ncell(cube_plots))
-  plot_xy <- rasterToPoints(cube_plots)[,1:2]
-  cube_pixels <- disaggregate(cube_plots, fact = fact)
+  plot_xy <- as.data.frame(cube_plots, xy=T) %>% dplyr::select(x,y)
+  cube_pixels <- disagg(cube_plots, fact = fact)
   # Convert to points
-  plot_points <- rasterToPoints(cube_pixels) %>% 
-    as_tibble() %>% 
-    rename(group = layer)
-  cube_points <- rasterToPoints(cube) %>% 
-    as_tibble() %>% 
+  plot_points <- as.data.frame(cube_pixels, xy=T) %>%
+    dplyr::rename_with(~c('x','y','group'))
+  cube_points <- as.data.frame(cube, xy=T) %>% 
    right_join(plot_points, by = c('x', 'y'))
   n_pixels <- cube_points %>% 
     group_by(group) %>% 
     do(count_noNA(.)) %>% 
     mutate(n_total = fact^2,
            prop = n / n_total) %>% 
-    ungroup()
-  group_df <- SpatialPixelsDataFrame(plot_xy, dplyr::select(n_pixels, n:prop), proj4string = CRS(proj4string(cube) ))
-  cube_count <- brick(group_df)
+    ungroup() %>%
+    dplyr::select(n:prop)
+  cube_count <- rast(cbind.data.frame(plot_xy, n_pixels), 'xyz', crs = crs(cube))
   return(cube_count)
 }
 
 
 ### SS gamma and alpha ----
+# updated to include na.rm = T
 sum_squares <- function(Y) {
   n <- nrow(Y)
   Y.cent <- scale(Y, center = T, scale = F)
   sij <- Y.cent^2
-  SS.total <- sum(sij)
-  SS.row <- rowSums(sij)
-  SS.col <- colSums(sij)
+  SS.total <- sum(sij, na.rm = T)
+  SS.row <- rowSums(sij, na.rm = T)
+  SS.col <- colSums(sij, na.rm = T)
   fcsd <- SS.col / SS.total
   lcsd <- SS.row / SS.total
   sdiv <- SS.total / (n - 1)
@@ -181,6 +182,7 @@ sum_squares <- function(Y) {
 
 
 ### SS beta ----
+# updated to include na.rm = T
 sum_squares_beta <- function(Y, m) {
   n <- nrow(Y)
   Y.cent <- bind_cols(dplyr::select(Y, group), as.data.frame(scale(dplyr::select(Y, -group), scale = F)))
@@ -190,9 +192,9 @@ sum_squares_beta <- function(Y, m) {
     summarise_at(vars(-group_cols()), sum) %>% 
     ungroup() %>% 
     dplyr::select(-group)
-  SSbk <- rowSums(mskj)
-  SSbj <- colSums(mskj)
-  SSb <- sum(SSbk)
+  SSbk <- rowSums(mskj, na.rm = T)
+  SSbj <- colSums(mskj, na.rm = T)
+  SSb <- sum(SSbk, na.rm = T)
   sdiv <- SSb / (n - 1)
   fcsd <- SSbj / SSb
   lcsd <- SSbk / SSb
@@ -202,8 +204,10 @@ sum_squares_beta <- function(Y, m) {
 
 
 ### Partitioning spectral diversity ----
+# updated to work with terra
 specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
-  require(raster)
+  # require(raster)
+  require(terra)
   require(tidyverse)
   
   # Find minimum number for resampling
@@ -211,25 +215,22 @@ specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
   
   # Remove plots with n pixels less than prop
   plot_mask <- subset(n_pixels, 'prop') < prop
-  n_pixels_mask <- raster::mask(n_pixels, plot_mask, maskvalue = 1)
-  min_pixels <- minValue(n_pixels_mask, 1)
+  n_pixels_mask <- terra::mask(n_pixels, plot_mask, maskvalue = 1)
+  min_pixels <- minmax(n_pixels_mask)[1,1]
   
   # Get cube with plots
   nlayers <- dim(cube)[3]
-  cube_plots <- raster(crs = proj4string(n_pixels_mask))
-  extent(cube_plots) <- extent(n_pixels_mask)
+  cube_plots <- rast(crs = crs(n_pixels_mask))
+  ext(cube_plots) <- ext(n_pixels_mask)
   res(cube_plots) <- res(n_pixels_mask)
   cube_plots <- setValues(cube_plots, values = 1:ncell(cube_plots))
-  cube_plots_masked <- raster::mask(cube_plots, plot_mask, maskvalue = 1)
-  cube_pixels <- disaggregate(cube_plots_masked, fact = fact)
+  names(cube_plots) <- 'group'
+  cube_plots_masked <- terra::mask(cube_plots, plot_mask, maskvalue = 1)
+  cube_pixels <- disagg(cube_plots_masked, fact = fact)
   
   # Convert to points
-  plots_points <- rasterToPoints(cube_plots_masked) %>% 
-    as_tibble() %>% 
-    rename(group = layer)
-  pixels_points <- rasterToPoints(cube_pixels) %>% 
-    as_tibble() %>% 
-    rename(group = layer)
+  plots_points <- as.data.frame(cube_plots_masked, xy = T) 
+  pixels_points <- as.data.frame(cube_pixels, xy = T)
   
   # Objects to store results
   gamma_ss <- double()
@@ -246,14 +247,13 @@ specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
   
   # Loop to randomly sample min pixels
   for (i in 1:n) {
-    cube_points <- rasterToPoints(cube) %>% 
-      as_tibble() %>% 
+    cube_points <- as.data.frame(cube, xy = T) %>% 
       inner_join(pixels_points, by = c('x', 'y')) %>% 
       group_by(group) %>% 
       sample_n(size = min_pixels) %>% 
       ungroup()
-    xy_all <- dplyr::select(cube_points, x, y)
-    xy_plots <- dplyr::select(plots_points, x, y)
+    xy_all <- cube_points %>% dplyr::select(x,y)
+    xy_plots <- plots_points %>% dplyr::select(x,y)
     
     # Gamma diversity
     cube_points_sel_gamma <- cube_points %>%
@@ -299,42 +299,40 @@ specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
   
   # LCSD beta
   lcsd_beta_values <- beta_lcsd %>% 
-    rename(lcsd_beta = lcsd) %>% 
+    dplyr::rename(lcsd_beta = lcsd) %>% 
     dplyr::select(-rep) %>% 
     group_by(group) %>% 
     summarise_all(mean) %>% 
     ungroup() %>% 
     dplyr::select(-group)
-  lcsd_beta_df <- SpatialPixelsDataFrame(xy_plots, lcsd_beta_values, proj4string = CRS(proj4string(cube) ))
-  lcsd_beta_raster <- raster(lcsd_beta_df)
+  lcsd_beta_rast <- rast(cbind.data.frame(xy_plots, lcsd_beta_values), 'xyz', crs = crs(cube))
+
   
   # LCSS beta
   lcss_beta_values <- beta_lcss %>% 
-    rename(lcss_beta = lcss) %>% 
+    dplyr::rename(lcss_beta = lcss) %>% 
     dplyr::select(-rep) %>% 
     group_by(group) %>% 
     summarise_all(mean) %>% 
     ungroup() %>% 
     dplyr::select(-group)
-  lcss_beta_df <- SpatialPixelsDataFrame(xy_plots, lcss_beta_values, proj4string = CRS(proj4string(cube) ))
-  lcss_beta_raster <- raster(lcss_beta_df)
+  lcss_beta_rast <- rast(cbind.data.frame(xy_plots, lcss_beta_values), 'xyz', crs = crs(cube))
   
   # FCSD
-  fcsd_beta <- colMeans(beta_fcsd)
-  fcsd_gamma <- colMeans(gamma_fcsd)
+  fcsd_beta <- colMeans(beta_fcsd, na.rm = T)
+  fcsd_gamma <- colMeans(gamma_fcsd, na.rm = T)
   fcsd_alpha_values <- alpha_fcsd %>% 
     dplyr::select(-rep) %>% 
     group_by(group) %>% 
     summarise_all(mean) %>% 
     ungroup() %>% 
-    dplyr::select(-group)
-  fcsd_alpha_df <- SpatialPixelsDataFrame(xy_plots, fcsd_alpha_values, proj4string = CRS(proj4string(cube) ))
-  fcsd_alpha_brick <- brick(fcsd_alpha_df)
-  fcsd_alpha_mean <- colMeans(fcsd_alpha_values)
+    dplyr::select(-group) 
+  fcsd_alpha_rast <- rast(cbind.data.frame(xy_plots, fcsd_alpha_values), 'xyz', crs = crs(cube))
+  fcsd_alpha_mean <- colMeans(fcsd_alpha_values, na.rm = T)
   
   # SS
-  ss_beta <- mean(beta_ss)
-  ss_gamma <- mean(gamma_ss)
+  ss_beta <- mean(beta_ss, na.rm = T)
+  ss_gamma <- mean(gamma_ss, na.rm = T)
   ss_alpha_sum <- alpha_ss %>%
     dplyr::select(-group) %>% 
     group_by(rep) %>% 
@@ -344,17 +342,16 @@ specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
     as.double()
   
   # SDiv
-  sdiv_beta <- mean(beta_sdiv)
-  sdiv_gamma <- mean(gamma_sdiv)
+  sdiv_beta <- mean(beta_sdiv, na.rm = T)
+  sdiv_gamma <- mean(gamma_sdiv, na.rm = T)
   sdiv_alpha_values <- alpha_sdiv %>% 
-    rename(sdiv_alpha = sdiv) %>% 
+    dplyr::rename(sdiv_alpha = sdiv) %>% 
     dplyr::select(-rep) %>% 
     group_by(group) %>% 
     summarise_all(mean) %>% 
     ungroup() %>% 
     dplyr::select(-group)
-  sdiv_alpha_df <- SpatialPixelsDataFrame(xy_plots, sdiv_alpha_values, proj4string = CRS(proj4string(cube) ))
-  sdiv_alpha_raster <- raster(sdiv_alpha_df)
+  sdiv_alpha_rast <- rast(cbind.data.frame(xy_plots, sdiv_alpha_values), 'xyz', crs = crs(cube))
   sdiv_alpha_mean <- mean(sdiv_alpha_values$sdiv_alpha)
   
   # Prepare outputs
@@ -362,8 +359,8 @@ specdiv <- function(cube, fact = 40, prop = 0.5, n = 1) {
     mutate(prop_gamma = sum_squares / ss_gamma)
   sdiv <- c(sdiv_alpha_mean, sdiv_beta, sdiv_gamma) ; names(sdiv) <- c('mean_alpha', 'beta', 'gamma')
   fcsd <- bind_cols(source = c('mean_alpha', 'beta', 'gamma'), bind_rows(fcsd_alpha_mean, fcsd_beta, fcsd_gamma))
-  rasters <- list(beta_lcsd = lcsd_beta_raster, beta_lcss = lcss_beta_raster, alpha_sdiv = sdiv_alpha_raster, alpha_fcsd = fcsd_alpha_brick)
-  out <- list(ss = ss, sdiv = sdiv, fcsd = fcsd, rasters = rasters)
+  rasts <- list(beta_lcsd = lcsd_beta_rast, beta_lcss = lcss_beta_rast, alpha_sdiv = sdiv_alpha_rast, alpha_fcsd = fcsd_alpha_rast)
+  out <- list(ss = ss, sdiv = sdiv, fcsd = fcsd, rasters = rasts)
   return(out)
 }
 

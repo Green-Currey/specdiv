@@ -95,7 +95,7 @@ pca <- function(cube, scaling = c(1, 2), p = 0.99) {
 ### Make PC plots ----
 make_plot <- function(df) {
   x <- ggplot(df, aes(x = x, y = y) ) +
-    geom_raster(aes(fill = value)) +
+    geom_tile(aes(fill = value)) +
     scale_fill_gradientn(colors = rainbow(20)) +
     ggtitle(label = unique(df$PC)) +
     theme_void() +
@@ -109,10 +109,10 @@ make_plot <- function(df) {
 ### Build the PC plots ----
 build_pc_plot <- function(cube) {
   require(tidyverse)
-  points <- rasterToPoints(cube, spatial = F) %>% 
-    as_tibble() %>% 
+  points <- as.data.frame(cube, xy = T) %>% 
     tidyr::gather(key = PC, value = value, -x, -y) %>% 
     dplyr::mutate(PC = factor(PC, levels = paste0('PC', 1:n_distinct(PC)) ) ) 
+  
   cube_plots <- points %>%
     group_by(PC) %>% 
     dplyr::do(plots = make_plot(df = .))
